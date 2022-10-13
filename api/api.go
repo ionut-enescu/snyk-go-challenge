@@ -34,6 +34,8 @@ var goroutineCount WaitGroupCount
 
 var rootPkg *NpmPackageVersion
 
+var scannedPkgs map[string]*NpmPackageVersion
+
 func New() http.Handler {
 	// IE: use log for logging instead of fmt for extra features (i.e. timestamp)
 	errorLogger = log.New(os.Stdout, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile)
@@ -48,6 +50,8 @@ func New() http.Handler {
 
 	// IE: cache the last request for instant response on repeated identical requests
 	lastRequest = make(map[string][]byte)
+
+	scannedPkgs = make(map[string]*NpmPackageVersion)
 	return router
 }
 
@@ -144,11 +148,11 @@ func packageHandler(w http.ResponseWriter, r *http.Request) {
 // IE: need to send each package retrieval on a separate thread
 func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string) {
 	// IE: signal that the goroutine is done to WaitGroup before each goroutine ends
-	defer wg.Done()
+	// defer wg.Done()
 
 	// IE: debug counter
 	goroutineCount.Add(1)
-	debugLogger.Println("Starting goroutine", goroutineCount.GetCount())
+	// debugLogger.Println("Starting goroutine", goroutineCount.GetCount())
 
 	pkgMeta, err := fetchPackageMeta(pkg.Name)
 	if err != nil {
@@ -177,25 +181,30 @@ func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string) {
 		dep := &NpmPackageVersion{Name: dependencyName, Version: dependencyVersionConstraint, Dependencies: map[string]*NpmPackageVersion{}}
 
 		// // IE: get dependencies for nodes already scanned, NOT WORKING ATM
-		// var cachedDeps *NpmPackageVersion
-		// getCachedDeps(dependencyName, dependencyVersionConstraint, rootPkg, cachedDeps)
-		// if cachedDeps != nil {
-		// 	pkg.Dependencies = cachedDeps.Dependencies
-		// } else {
+		var cachedDeps *NpmPackageVersion
+		getCachedDeps(dependencyName, dependencyVersionConstraint, rootPkg, cachedDeps)
+		if cachedDeps != nil {
+			pkg.Dependencies = cachedDeps.Dependencies
+		} else {
 
-		pkg.Dependencies[dependencyName] = dep
-		if len(pkg.Dependencies) > 0 {
-			// IE: send each each package dependency retrieval on a new goroutine
-			wg.Add(1)
-			go resolveDependencies(dep, dependencyVersionConstraint)
+			pkg.Dependencies[dependencyName] = dep
+			if len(pkg.Dependencies) > 0 {
+				// IE: send each each package dependency retrieval on a new goroutine
+				// wg.Add(1)
+				// go resolveDependencies(dep, dependencyVersionConstraint)
+
+				resolveDependencies(dep, dependencyVersionConstraint)
+
+			}
+
 		}
-
-		// }
 	}
 
 	// IE: debug counter
-	debugLogger.Println("Ending goroutine", goroutineCount.GetCount())
+	// debugLogger.Println("Ending goroutine", goroutineCount.GetCount())
 	goroutineCount.Add(-1)
+	scannedPkgs[fmt.Sprintf("%s%s", pkg.Name, pkg.Version)] = pkg
+	debugLogger.Println("Scanned package", fmt.Sprintf("%s%s", pkg.Name, pkg.Version))
 }
 
 // IE: this func should be checking asynchronously if a certain package
@@ -203,16 +212,25 @@ func resolveDependencies(pkg *NpmPackageVersion, versionConstraint string) {
 // so that its dependencies could be simply copied to another tree level where that dependency resides
 // TODO: NOT WORKING ATM, FIX IT
 func getCachedDeps(name string, version string, curNode *NpmPackageVersion, cachedDeps *NpmPackageVersion) {
-	if len(curNode.Dependencies) == 0 {
+	// if len(curNode.Dependencies) == 0 {
+	// 	cachedDeps = []
+	// 	return
+	// }
+
+	// for _, dep := range curNode.Dependencies {
+	// 	if name == dep.Name && version == dep.Version {
+	// 		cachedDeps = dep
+	// 		debugLogger.Println("Found duplicate: ", dep.Name, dep.Version)
+	// 		return
+	// 	}
+
+	// 	getCachedDeps(name, version, dep, cachedDeps)
+	// }
+
+	if cachedPkg, exist := scannedPkgs[fmt.Sprintf("%s%s", name, version)]; exist {
+		cachedDeps = cachedPkg
+		debugLogger.Println("Found duplicate: ", cachedPkg.Name, cachedPkg.Version)
 		return
-	}
-
-	for _, dep := range curNode.Dependencies {
-		if name == dep.Name && version == dep.Version {
-			cachedDeps = dep
-		}
-
-		getCachedDeps(name, version, dep, cachedDeps)
 	}
 }
 
@@ -232,8 +250,7 @@ func highestCompatibleVersion(constraintStr string, versions *npmPackageMetaResp
 	}
 
 	sort.Sort(filtered)
-	// IE: why assume that last version returned by filterCompatibleVersions() is also the latest? what if someone changes that method at some point?
-	// IE: should look inside the whole 'filtered' collection for the latest version
+
 	return filtered[len(filtered)-1].String(), nil
 }
 
